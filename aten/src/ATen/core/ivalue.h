@@ -37,6 +37,11 @@ class List;
 template <class T>
 class IListRef;
 struct IValue;
+
+template <typename T>
+concept IValueCompatible =
+    !std::is_lvalue_reference_v<T> && std::is_constructible_v<IValue, T>;
+
 struct ClassType;
 struct Type;
 class RRefInterface;
@@ -505,21 +510,9 @@ struct TORCH_API IValue final {
   // Tuple
   IValue(c10::intrusive_ptr<ivalue::Tuple> v);
 
-  template <
-      typename... Args,
-      std::enable_if_t<
-          !std::disjunction_v<
-              std::is_lvalue_reference<Args>...,
-              std::negation<std::is_constructible<IValue, Args>>...>,
-          std::nullptr_t> = nullptr>
+  template <IValueCompatible... Args>
   IValue(const std::tuple<Args...>& t);
-  template <
-      typename... Args,
-      std::enable_if_t<
-          !std::disjunction_v<
-              std::is_lvalue_reference<Args>...,
-              std::negation<std::is_constructible<IValue, Args>>...>,
-          std::nullptr_t> = nullptr>
+  template <IValueCompatible... Args>
   IValue(std::tuple<Args...>&& t);
   bool isTuple() const {
     return Tag::Tuple == tag;
