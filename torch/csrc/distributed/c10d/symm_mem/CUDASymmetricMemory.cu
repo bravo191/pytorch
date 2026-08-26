@@ -549,6 +549,23 @@ static bool check_group_multicast_support(
   }
 }
 
+#if !defined(USE_ROCM) && defined(PYTORCH_C10_DRIVER_API_SUPPORTED) && \
+    defined(CUDART_SUPPORTS_MULTICAST)
+static void warn_cuda_driver_error(CUresult err, const char* message) {
+  if (err == CUDA_SUCCESS) {
+    return;
+  }
+  const char* err_str = nullptr;
+  auto get_error_str_err =
+      c10::cuda::DriverAPI::get()->cuGetErrorString_(err, &err_str);
+  if (get_error_str_err != CUDA_SUCCESS) {
+    LOG(WARNING) << message << ": CUDA driver error: unknown error";
+  } else {
+    LOG(WARNING) << message << ": CUDA driver error: " << err_str;
+  }
+}
+#endif
+
 template <bool use_fabric_handle>
 static void init_multicast_for_block(
     HandleType& mc_handle,
@@ -607,18 +624,37 @@ static void init_multicast_for_block(
     recv_handle = pg_broadcast(group, block->device_idx, 0, mc_exported_handle);
   } else {
     // TODO implement storeExchange.broadcast
-    auto gathered_handles = storeExchange.all_gather(store, rank, world_size, mc_exported_handle);
+    std::vector<McHandleType> gathered_handles;
+    try {
+      gathered_handles =
+          storeExchange.all_gather(store, rank, world_size, mc_exported_handle);
+    } catch (const c10::Error&) {
+      if (rank == 0 && mc_handle != 0) {
+        warn_cuda_driver_error(
+            driver_api->cuMemRelease_(mc_handle),
+            "SymmetricMemory: failed to release multicast handle");
+        mc_handle = 0;
+      }
+      throw;
+    }
     recv_handle = std::move(gathered_handles[0]);
   }
 
   // Check exchange result
   if (memcmp(&recv_handle, &invalidator, sizeof(McHandleType)) == 0) {
+    if (rank == 0 && mc_handle != 0) {
+      warn_cuda_driver_error(
+          driver_api->cuMemRelease_(mc_handle),
+          "SymmetricMemory: failed to release multicast handle");
+      mc_handle = 0;
+    }
     LOG(WARNING) << "Gracefully skipping multicast initialization.";
     return;
   }
 
   // Flip to true after all CUDA steps finish
   bool success_end = false;
+  bool multicast_bound = false;
 
   // Phase 3: Import handle -- every rank, rank 0 included, which self-imports
   // the handle it just exported so that every rank's multicast mapping has
@@ -635,6 +671,33 @@ static void init_multicast_for_block(
   // multicast aperture always reports device ordinal 0, so src != dst forces
   // the peer path for every other device.
   HandleType imported_mc_handle = 0;
+  auto cleanup_multicast = [&]() {
+    if (mc_addr != nullptr) {
+      warn_cuda_driver_error(
+          driver_api->cuMemUnmap_(
+              reinterpret_cast<CUdeviceptr>(mc_addr), block->block_size),
+          "SymmetricMemory: failed to unmap multicast handle");
+      mc_addr = nullptr;
+    }
+    if (imported_mc_handle != 0) {
+      if (multicast_bound) {
+        warn_cuda_driver_error(
+            driver_api->cuMulticastUnbind_(
+                imported_mc_handle, block->device_idx, 0, block->block_size),
+            "SymmetricMemory: failed to unbind multicast handle");
+      }
+      warn_cuda_driver_error(
+          driver_api->cuMemRelease_(imported_mc_handle),
+          "SymmetricMemory: failed to release multicast handle");
+      imported_mc_handle = 0;
+    }
+    if (mc_handle != 0) {
+      warn_cuda_driver_error(
+          driver_api->cuMemRelease_(mc_handle),
+          "SymmetricMemory: failed to release multicast handle");
+      mc_handle = 0;
+    }
+  };
   if constexpr (!use_fabric_handle) {
     // Convert back to a handle from the broadcasted POSIX file descriptor.
     // The fd is the handle: widen it to pointer size, then reinterpret it as
@@ -654,8 +717,17 @@ static void init_multicast_for_block(
       driver_api->cuMulticastAddDevice_(imported_mc_handle, block->device_idx), check_all);
   C10_CUDA_DRIVER_CHECK_GOTO(driver_api->cuMulticastBindMem_(
       imported_mc_handle, 0, block->alloc_ref->handle, 0, block->block_size, 0), check_all);
+  multicast_bound = true;
 
-  success_end = true;
+  // Phase 5: Map to virtual memory
+  try {
+    map_block(&mc_addr, imported_mc_handle, block->block_size, block->device_idx);
+    success_end = true;
+  } catch (const std::exception& e) {
+    mc_addr = nullptr;
+    LOG(WARNING) << "SymmetricMemory: fail to map multicast handle.\n"
+                 << e.what();
+  }
 
 check_all:
   // Whether all ranks have succeeded
@@ -663,11 +735,29 @@ check_all:
   // uint8_t rather than bool: std::vector<bool> is not memcpy-able, which
   // pg_all_gather requires.
   auto success_flag = static_cast<uint8_t>(success_end);
-  auto rank_successes = use_pg
-      ? pg_all_gather(group, block->device_idx, success_flag)
-      : storeExchange.all_gather(store, rank, world_size, success_flag);
+  std::vector<uint8_t> rank_successes;
+  try {
+    rank_successes = use_pg
+        ? pg_all_gather(group, block->device_idx, success_flag)
+        : storeExchange.all_gather(store, rank, world_size, success_flag);
+  } catch (const c10::Error&) {
+    if constexpr (!use_fabric_handle) {
+      close(recv_handle);
+    }
+    cleanup_multicast();
+    throw;
+  }
   for (int r = 0; r < world_size; ++r) {
     all_succeed &= (rank_successes[r] != 0);
+  }
+  // Close the file descriptor before exit
+  if constexpr (!use_fabric_handle) {
+    close(recv_handle);
+  }
+  if (!all_succeed) {
+    cleanup_multicast();
+    LOG(WARNING) << "Gracefully skipping multicast initialization.";
+    return;
   }
   if (imported_mc_handle != 0) {
     // Rank 0 may only drop the reference cuMulticastCreate gave it once every
@@ -680,18 +770,8 @@ check_all:
       C10_CUDA_DRIVER_CHECK(driver_api->cuMemRelease_(mc_handle));
     }
     mc_handle = imported_mc_handle;
+    imported_mc_handle = 0;
   }
-  // Close the file descriptor before exit
-  if constexpr (!use_fabric_handle) {
-    close(recv_handle);
-  }
-  if (!all_succeed) {
-    LOG(WARNING) << "Gracefully skipping multicast initialization.";
-    return;
-  }
-
-  // Phase 5: Map to virtual memory
-  map_block(&mc_addr, mc_handle, block->block_size, block->device_idx);
 #endif
 }
 
