@@ -53,6 +53,11 @@ if TYPE_CHECKING:
     USER_INPUT_DTYPES: list[str | None] = []
     USER_INPUT_DEVICES: list[str | None] = []
     USER_INPUT_BOUNDS: list[dict[int, tuple[int | None, int | None]] | None] = []
+    _DYNAMO_BACKEND_IDS: tuple[str, ...] = ()
+    _DYNAMO_BACKEND_SOURCES: tuple[str, ...] = ()
+    _DYNAMO_PYTHON_VERSION: tuple[int, int] = (0, 0)
+    _DYNAMO_STATE: str = ""
+    TRAINING: bool = False
 
     # The compiled/captured graph's entry point, emitted before the driver.
     def call(flat_inputs: list[object]) -> list[object]: ...
@@ -366,3 +371,111 @@ def _inductor_forward(*args):
             else:
                 p.grad.add_(g)
     return _pytree.tree_unflatten(out, _pytree.treespec_loads(OUT_SPEC))
+
+
+def _build_dynamo_forward():
+    """Rebuild Dynamo's guards and transformed bytecode into a standalone dispatcher.
+
+    The compiled graph sources stay ordinary Python in the artifact. Only the minimized
+    Dynamo dispatch guards and transformed code objects are opaque, because neither has
+    a source form. There is no compiler behind this dispatcher: a miss against every
+    retained guard set raises instead of compiling another specialization.
+    """
+    import base64
+    import importlib
+    import inspect
+    import pickle
+    import sys
+    import types
+
+    import torch
+    from torch._dynamo.package import (
+        load_guard_manager,
+        load_guards_state,
+        SerializedCode,
+    )
+
+    if tuple(_DYNAMO_PYTHON_VERSION) != sys.version_info[:2]:
+        from torch._precompile import PrecompileError
+
+        raise PrecompileError(
+            "precompile artifact was produced on Python "
+            f"{_DYNAMO_PYTHON_VERSION[0]}.{_DYNAMO_PYTHON_VERSION[1]}, but is "
+            f"being loaded on Python {sys.version_info[0]}.{sys.version_info[1]}."
+        )
+
+    state = pickle.loads(base64.b64decode(_DYNAMO_STATE))
+    namespace = globals()
+    for alias, module_name in state["import_sources"].items():
+        namespace[alias] = importlib.import_module(module_name)
+
+    def make_backend(call):
+        def run(*args):
+            return call(list(args))
+
+        return torch._dynamo.disable(run)
+
+    for index, (backend_id, source) in enumerate(
+        zip(_DYNAMO_BACKEND_IDS, _DYNAMO_BACKEND_SOURCES)
+    ):
+        backend_namespace = {"__name__": f"_precompiled_backend_{index}"}
+        exec(
+            compile(source, f"<precompile-backend-{index}>", "exec"),
+            backend_namespace,
+        )
+        namespace[backend_id] = make_backend(backend_namespace["call"])
+
+    target = SerializedCode.to_code_object(state["code"])
+    defaults = state["defaults"]
+    kwdefaults = state["kwdefaults"]
+
+    def make_cell(value):
+        def read():
+            return value
+
+        if read.__closure__ is None:
+            raise AssertionError("expected a closure cell")
+        return read.__closure__[0]
+
+    closure_values = state["closure"]
+    closure = (
+        tuple(make_cell(value) for value in closure_values)
+        if closure_values is not None
+        else None
+    )
+    variants = []
+    for guarded in state["variants"]:
+        guards_state = load_guards_state(guarded["guards_state"])
+        manager = load_guard_manager(guards_state, target, namespace)
+        code = SerializedCode.to_code_object(guarded["dynamo_code"])
+        function = types.FunctionType(
+            code, namespace, target.co_name, defaults, closure
+        )
+        if kwdefaults:
+            function.__kwdefaults__ = dict(kwdefaults)
+        variants.append((manager, function))
+
+    target_function = types.FunctionType(
+        target, namespace, target.co_name, defaults, closure
+    )
+    if kwdefaults:
+        target_function.__kwdefaults__ = dict(kwdefaults)
+    signature = inspect.signature(target_function)
+
+    def forward(*args):
+        bound = signature.bind(*args)
+        bound.apply_defaults()
+        local_scope = dict(bound.arguments)
+        with torch.set_grad_enabled(TRAINING):
+            for manager, function in variants:
+                if manager.check(local_scope):
+                    return function(*args)
+        from torch._precompile import PrecompileError
+
+        raise PrecompileError(
+            f"precompile: no captured Dynamo variant of {target.co_name!r} matches "
+            f"this call. Add an example covering it and precompile again; the artifact "
+            f"contains {len(variants)} guarded variant(s)."
+        )
+
+    return forward
