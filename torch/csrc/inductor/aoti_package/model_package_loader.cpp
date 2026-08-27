@@ -949,6 +949,24 @@ AOTIModelPackageLoader::AOTIModelPackageLoader(
   }
 }
 
+AOTIModelPackageLoader::AOTIModelPackageLoader(
+    const std::string& model_package_path,
+    const std::string& model_name,
+    const bool run_single_threaded,
+    const size_t num_runners,
+    const c10::DeviceIndex device_index,
+    const bool use_stream_affinity)
+    : AOTIModelPackageLoader(
+          model_package_path,
+          model_name,
+          run_single_threaded,
+          num_runners,
+          device_index) {
+  if (use_stream_affinity) {
+    runner_->set_use_stream_affinity(true);
+  }
+}
+
 AOTIModelPackageLoader::~AOTIModelPackageLoader() {
   // Clean up the temporary directory
   if (!temp_dir_.empty() && !is_directory_) {

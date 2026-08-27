@@ -252,6 +252,27 @@ AOTIModelContainerRunner::~AOTIModelContainerRunner() {
   }
 }
 
+void AOTIModelContainerRunner::set_use_stream_affinity(
+    bool use_stream_affinity) {
+  TORCH_CHECK(
+      model_so_ != nullptr,
+      "Stream affinity is unavailable for custom AOTI device runners");
+  decltype(&AOTInductorModelContainerSetUseStreamAffinity) set_affinity_func =
+      nullptr;
+  try {
+    set_affinity_func = reinterpret_cast<decltype(set_affinity_func)>(
+        model_so_->sym("AOTInductorModelContainerSetUseStreamAffinity"));
+  } catch (const at::DynamicLibraryError&) {
+    // Report the missing optional symbol below with upgrade guidance.
+  }
+  TORCH_CHECK(
+      set_affinity_func != nullptr,
+      "AOTInductorModelContainerSetUseStreamAffinity is unavailable. "
+      "Rebuild the model with the latest AOTInductor.");
+  AOTI_RUNTIME_ERROR_CODE_CHECK(
+      set_affinity_func(container_handle_, use_stream_affinity));
+}
+
 std::vector<at::Tensor> AOTIModelContainerRunner::run_impl(
     std::vector<AtenTensorHandle>& input_handles,
     void* stream_handle) {

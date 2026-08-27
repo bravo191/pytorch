@@ -255,7 +255,10 @@ def _aoti_compile_and_package_inner(
 
 
 def aoti_load_package(
-    path: FileLike, run_single_threaded: bool = False, device_index: int = -1
+    path: FileLike,
+    run_single_threaded: bool = False,
+    device_index: int = -1,
+    use_stream_affinity: bool = False,
 ) -> AOTICompiledModel:
     """
     Loads the model from the PT2 package.
@@ -279,11 +282,17 @@ def aoti_load_package(
             to be loaded. By default, `device_index=-1` is used, which corresponds
             to the device `cuda` when using CUDA. Passing `device_index=1` would
             load the package to `cuda:1`, for example.
+        use_stream_affinity (bool): Whether each non-null device stream should
+            retain a stable model instance. Intended for controlled
+            multi-stream benchmarking; this may reduce host-side pipelining.
     """
     from torch._inductor.package import load_package
 
     return load_package(
-        path, run_single_threaded=run_single_threaded, device_index=device_index
+        path,
+        run_single_threaded=run_single_threaded,
+        device_index=device_index,
+        use_stream_affinity=use_stream_affinity,
     )
 
 

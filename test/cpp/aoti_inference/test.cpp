@@ -1053,7 +1053,10 @@ class ThreadPool {
   }
 };
 
-void test_multi_cuda_streams(const std::string& device) {
+void test_multi_cuda_streams(
+    const std::string& device,
+    bool use_stream_affinity = false,
+    size_t num_runners = 4) {
   c10::InferenceMode mode;
   std::string data_path =
       (std::filesystem::path(STRINGIZE(CMAKE_CURRENT_BINARY_DIR)) / "data.pt")
@@ -1073,7 +1076,7 @@ void test_multi_cuda_streams(const std::string& device) {
   std::vector<std::vector<torch::Tensor>> all_outputs(N);
   // Create thread pool with desired number of threads
   torch::inductor::AOTIModelPackageLoader loader(
-      pt2_package_path, "model", false, num_threads);
+      pt2_package_path, "model", false, num_runners, -1, use_stream_affinity);
   ThreadPool pool(num_threads);
   std::mutex results_mutex;
 
@@ -1098,6 +1101,50 @@ void test_multi_cuda_streams(const std::string& device) {
 
   for (int i = 0; i < N; i++) {
     ASSERT_TRUE(torch::allclose(ref_output_tensors[0], all_outputs[i][0]));
+  }
+}
+
+void test_concurrent_same_cuda_stream_affinity(const std::string& device) {
+  c10::InferenceMode mode;
+  const std::string data_path =
+      (std::filesystem::path(STRINGIZE(CMAKE_CURRENT_BINARY_DIR)) / "data.pt")
+           .string();
+  torch::jit::script::Module data_loader = torch::jit::load(data_path);
+  const auto& pt2_package_path =
+      data_loader.attr(("pt2_package_path_" + device).c_str()).toStringRef();
+  const auto ref_output =
+      data_loader.attr(("outputs_" + device).c_str()).toTensorList().get(0);
+  const auto inputs =
+      data_loader.attr(("inputs_" + device).c_str()).toTensorList().vec();
+
+  constexpr int num_threads = 2;
+  torch::inductor::AOTIModelPackageLoader loader(
+      pt2_package_path,
+      "model",
+      false,
+      num_threads,
+      -1,
+      /*use_stream_affinity=*/true);
+  const auto stream = c10::cuda::getStreamFromPool();
+  std::atomic<int> ready{0};
+  std::vector<std::vector<torch::Tensor>> all_outputs(num_threads);
+  std::vector<std::thread> threads;
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      c10::cuda::CUDAStreamGuard stream_guard(stream);
+      ready.fetch_add(1);
+      while (ready.load() < num_threads) {
+      }
+      all_outputs[i] = loader.run(inputs, stream.stream());
+    });
+  }
+  for (auto& thread : threads) {
+    thread.join();
+  }
+  stream.synchronize();
+
+  for (const auto& outputs : all_outputs) {
+    ASSERT_TRUE(torch::allclose(ref_output, outputs[0]));
   }
 }
 #endif // USE_CUDA
@@ -1514,6 +1561,19 @@ TEST_F(AotInductorTest, FreeInactiveConstantBufferRuntimeConstantFoldingCuda) {
 
 TEST_F(AotInductorTest, MultiStreamTestCuda) {
   test_multi_cuda_streams("cuda");
+}
+
+TEST_F(AotInductorTest, MultiStreamAffinityTestCuda) {
+  test_multi_cuda_streams("cuda", /*use_stream_affinity=*/true);
+}
+
+TEST_F(AotInductorTest, OversubscribedMultiStreamAffinityTestCuda) {
+  test_multi_cuda_streams(
+      "cuda", /*use_stream_affinity=*/true, /*num_runners=*/1);
+}
+
+TEST_F(AotInductorTest, ConcurrentSameStreamAffinityTestCuda) {
+  test_concurrent_same_cuda_stream_affinity("cuda");
 }
 
 TEST_F(AotInductorTest, CudaAllocTestCuda) {

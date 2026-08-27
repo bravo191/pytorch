@@ -118,6 +118,13 @@ AOTI_API AOTIRuntimeError AOTInductorModelContainerCreateWithExternalConstants(
     const AOTInductorConstantMapEntry* constant_entries,
     size_t num_constant_entries);
 
+// Enables or disables stable device-stream-to-model assignment. This must be
+// configured before the first model run. A null stream handle continues to use
+// the default model-pool scheduling policy.
+AOTI_API AOTIRuntimeError AOTInductorModelContainerSetUseStreamAffinity(
+    AOTInductorModelContainerHandle container_handle,
+    bool use_stream_affinity);
+
 // Deletes the AOTInductor model container.
 AOTI_API AOTIRuntimeError AOTInductorModelContainerDelete(
     AOTInductorModelContainerHandle container_handle);

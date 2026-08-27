@@ -70,6 +70,7 @@ class TORCH_API AOTIModelContainerRunner {
   void free_inactive_constant_buffer();
   void update_constant_buffer_from_blob(const std::string& weights_path);
   bool did_call_load_constants() const;
+  void set_use_stream_affinity(bool use_stream_affinity);
 
   std::vector<std::string> get_call_spec();
 
