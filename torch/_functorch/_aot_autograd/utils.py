@@ -103,10 +103,15 @@ def normalize_as_list(x: object) -> list[object]:
 
 
 def _get_autocast_states() -> list[Any]:
+    # Use the current accelerator type instead of the hardcoded "cuda", so that
+    # autocast state for third-party backends is also snapshotted correctly;
+    # fall back to "cuda" when no accelerator is present.
+    accelerator = torch.accelerator.current_accelerator()
+    gpu_type = accelerator.type if accelerator is not None else "cuda"
     return [
-        torch.is_autocast_enabled("cuda"),
+        torch.is_autocast_enabled(gpu_type),
         torch.is_autocast_enabled("cpu"),
-        torch.get_autocast_dtype("cuda"),
+        torch.get_autocast_dtype(gpu_type),
         torch.get_autocast_dtype("cpu"),
         torch.is_autocast_cache_enabled(),
     ]
