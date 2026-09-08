@@ -229,6 +229,8 @@ def benchmark_utilization(
         optimize_ctx = contextlib.nullcontext()
 
     chrome_trace_file_name = os.path.join(trace_folder, trace_file_name + ".json")
+    accelerator = torch.accelerator.current_accelerator()
+    device_type = accelerator.type if accelerator is not None else "cuda"
     total_length = dump_chrome_trace(
         f,
         input_,
@@ -236,7 +238,7 @@ def benchmark_utilization(
         optimize_ctx,
         [ProfilerActivity.CUDA],
         num_runs=num_runs,
-        devices=["cuda"],
+        devices=[device_type],
     )
     utilization, mm_conv_utilization = compute_utilization(
         chrome_trace_file_name, total_length
