@@ -103,13 +103,15 @@ def normalize_as_list(x: object) -> list[object]:
 
 
 def _get_autocast_states() -> list[Any]:
-    return [
-        torch.is_autocast_enabled("cuda"),
-        torch.is_autocast_enabled("cpu"),
-        torch.get_autocast_dtype("cuda"),
-        torch.get_autocast_dtype("cpu"),
-        torch.is_autocast_cache_enabled(),
-    ]
+    # Enumerate every autocast-capable device type (including PrivateUse1) so
+    # that the before/after comparison in callers notices state mutations on
+    # any device, not just cuda/cpu.
+    states: list[Any] = []
+    for device_type in torch._C._autocast_supported_devices():
+        states.append(torch.is_autocast_enabled(device_type))
+        states.append(torch.get_autocast_dtype(device_type))
+    states.append(torch.is_autocast_cache_enabled())
+    return states
 
 
 def make_boxed_func(f: Callable[..., Any]) -> Callable[[list[Any]], Any]:
