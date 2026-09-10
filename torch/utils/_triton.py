@@ -72,13 +72,12 @@ def get_triton_version(fallback: tuple[int, int] = (0, 0)) -> tuple[int, int]:
 
 @functools.cache
 def _device_supports_tensor_descriptor() -> bool:
-    import torch
+    from torch._dynamo.device_interface import get_registered_device_interfaces
 
-    return (
-        torch.cuda.is_available()
-        and torch.cuda.get_device_capability() >= (9, 0)
-        and not torch.version.hip
-    ) or has_triton_cpu_backend()
+    return any(
+        device_interface.is_tensor_descriptor_capable()
+        for _, device_interface in get_registered_device_interfaces()
+    )
 
 
 @functools.cache
@@ -137,17 +136,7 @@ def has_triton_tma() -> bool:
 @functools.cache
 def has_triton_tma_device() -> bool:
     if has_triton_package():
-        import torch
-
-        if (
-            (
-                torch.cuda.is_available()
-                and torch.cuda.get_device_capability() >= (9, 0)
-                and not torch.version.hip
-            )
-            or torch.xpu.is_available()
-            or has_triton_cpu_backend()
-        ):
+        if _device_supports_tensor_descriptor():
             # old API
             try:
                 from triton.language.extra.cuda import (  # noqa: F401
@@ -188,17 +177,7 @@ def has_datacenter_blackwell_tma_device() -> bool:
 @functools.lru_cache(None)
 def has_triton_stable_tma_api() -> bool:
     if has_triton_package():
-        import torch
-
-        if (
-            (
-                torch.cuda.is_available()
-                and torch.cuda.get_device_capability() >= (9, 0)
-                and not torch.version.hip
-            )
-            or torch.xpu.is_available()
-            or has_triton_cpu_backend()
-        ):
+        if _device_supports_tensor_descriptor():
             try:
                 from triton.language import make_tensor_descriptor  # noqa: F401
 
