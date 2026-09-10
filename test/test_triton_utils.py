@@ -86,6 +86,31 @@ class TestTritonUtils(TestCase):
             finally:
                 triton_utils.triton_backend.cache_clear()
 
+    def test_device_supports_tensor_descriptor_reads_registry(self):
+        # The TMA gate must come from the DeviceInterface registry, not from
+        # hardcoded cuda/cpu checks, so a registered capable backend opts in.
+        from torch._dynamo.device_interface import (
+            DeviceInterface,
+            device_interfaces,
+            register_interface_for_device,
+        )
+
+        class TensorDescriptorInterface(DeviceInterface):
+            @staticmethod
+            def is_tensor_descriptor_capable(device=None):
+                return True
+
+        triton_utils._device_supports_tensor_descriptor.cache_clear()
+        try:
+            with (
+                mock.patch("torch.cuda.is_available", return_value=False),
+                mock.patch.dict(device_interfaces),
+            ):
+                register_interface_for_device("test", TensorDescriptorInterface)
+                self.assertTrue(triton_utils._device_supports_tensor_descriptor())
+        finally:
+            triton_utils._device_supports_tensor_descriptor.cache_clear()
+
 
 if __name__ == "__main__":
     run_tests()

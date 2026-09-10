@@ -194,6 +194,16 @@ class DeviceInterface:
         return False
 
     @staticmethod
+    def is_tensor_descriptor_capable(device: torch.types.Device = None) -> bool:
+        """
+        Returns True if the device supports tensor descriptors (TMA), False
+        otherwise. This gates which devices participate in the TMA capability
+        probes in torch.utils._triton. Defaults to False so unknown backends
+        stay conservative until they opt in.
+        """
+        return False
+
+    @staticmethod
     def is_gpu() -> bool:
         """
         Returns True if Inductor should treat this device as a GPU-class
@@ -367,6 +377,14 @@ class CudaInterface(DeviceInterface):
         return (
             torch.version.hip is not None
             or CudaInterface.Worker.get_device_properties(device).major >= 7
+        )
+
+    @staticmethod
+    def is_tensor_descriptor_capable(device: torch.types.Device = None) -> bool:
+        return (
+            torch.cuda.is_available()
+            and torch.cuda.get_device_capability(device) >= (9, 0)
+            and not torch.version.hip
         )
 
     @staticmethod
@@ -587,6 +605,10 @@ class XpuInterface(DeviceInterface):
         return True
 
     @staticmethod
+    def is_tensor_descriptor_capable(device: torch.types.Device = None) -> bool:
+        return torch.xpu.is_available()
+
+    @staticmethod
     def raise_if_triton_unavailable(device: torch.types.Device = None) -> None:
         import triton.backends
 
@@ -651,6 +673,12 @@ class CpuInterface(DeviceInterface):
     @staticmethod
     def is_triton_capable(device: torch.types.Device = None) -> bool:
         return True
+
+    @staticmethod
+    def is_tensor_descriptor_capable(device: torch.types.Device = None) -> bool:
+        import triton.backends
+
+        return "cpu" in triton.backends.backends
 
     @staticmethod
     def raise_if_triton_unavailable(device: torch.types.Device = None) -> None:
