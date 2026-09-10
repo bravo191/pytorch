@@ -1025,10 +1025,13 @@ class AutogradCompilerInstance:
     # Eager autograd backward implements scalars as 0-dim tensors, see DivBackward0::other_.
     # When compiled autograd traces those nodes, it lifts the scalar tensors, resulting in a graph
     # with some cpu 0-dim tensor inputs. To prevent the entire graph from skipping cudagraph, we move the
-    # scalar tensors to cuda. This works because ATen/prims ops will accept cuda 0-dim tensors too.
-    def move_graph_nodes_to_cuda(self, graph: torch.fx.Graph) -> list[int]:
+    # scalar tensors to the device of the graph's non-cpu inputs. This works because ATen/prims ops
+    # will accept 0-dim tensors on the accelerator device too.
+    def move_graph_nodes_to_device(
+        self, graph: torch.fx.Graph
+    ) -> tuple[list[int], str | None]:
         to_move: dict[int, torch.fx.Node] = {}
-        has_cuda_inputs = False
+        device_type: str | None = None
         nodes = list(graph.nodes)
         if nodes[0].target != "inputs":
             raise AssertionError(
@@ -1045,8 +1048,8 @@ class AutogradCompilerInstance:
             raise AssertionError("Last getitem node does not match last inputs user")
         # getitem nodes on inputs
         for i, node in enumerate(inputs_users):
-            if not has_cuda_inputs and node.meta["val"].device.type == "cuda":
-                has_cuda_inputs = True
+            if device_type is None and node.meta["val"].device.type != "cpu":
+                device_type = node.meta["val"].device.type
                 continue
 
             is_cpu = node.meta["val"].device.type == "cpu"
@@ -1068,17 +1071,17 @@ class AutogradCompilerInstance:
                     # all users are prims/aten, can move safely
                     to_move[i] = node
 
-        # only move cpu scalars to cuda if there were cuda activations in this graph,
+        # only move cpu scalars if there were non-cpu activations in this graph,
         # this is to handle the case where cudagraphs is enabled on a cpu-only graph
-        if has_cuda_inputs:
+        if device_type is not None:
             for node in to_move.values():
-                verbose_log.debug("Moving node %s from cpu to cuda", node)
-                node.meta["val"] = node.meta["val"].cuda()
+                verbose_log.debug("Moving node %s from cpu to %s", node, device_type)
+                node.meta["val"] = node.meta["val"].to(device_type)
 
-            # return runtime indices we need to move to cuda
-            return list(to_move.keys())
+            # return runtime indices we need to move to the device
+            return list(to_move.keys()), device_type
 
-        return []
+        return [], device_type
 
     def dce(self) -> None:
         # Most of these removed nodes would have been removed during Dynamo and AOTDispatch
@@ -1171,8 +1174,11 @@ class AutogradCompilerInstance:
             {},
         )
         runtime_inputs_to_move: list[int] = []
+        device_type: str | None = None
         if snapshot_cudagraph_enabled():
-            runtime_inputs_to_move = self.move_graph_nodes_to_cuda(self.fx_tracer.graph)
+            runtime_inputs_to_move, device_type = self.move_graph_nodes_to_device(
+                self.fx_tracer.graph
+            )
 
         # We traced using dummy tensors. Delete all the metadata of the dummy tensors.
         # It's probably better to refactor this class to use a different tracer
@@ -1260,7 +1266,9 @@ class AutogradCompilerInstance:
                             filtered_sizes.append(integer)
 
                 for i in runtime_inputs_to_move:
-                    inputs[i] = inputs[i].pin_memory().cuda(non_blocking=True)
+                    inputs[i] = inputs[i].pin_memory().to(
+                        device_type, non_blocking=True
+                    )
 
                 with _disable(), make_compile_context(self.id):
                     out = compiled_fn(
@@ -1673,7 +1681,7 @@ def _enable(
         else:
             # we need to import this, because user might not have imported it if they directly use this context manager
             # we need to lazily import it, because of circular dependencies
-            if torch.cuda.is_available():
+            if torch.accelerator.is_available():
                 from torch._inductor import cudagraph_trees  # noqa: F401
 
             (

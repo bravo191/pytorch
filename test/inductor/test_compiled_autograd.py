@@ -6,6 +6,7 @@ import functools
 import io
 import itertools
 import logging
+import operator
 import os
 import re
 import subprocess
@@ -30,6 +31,7 @@ from torch._dynamo.utils import counters
 from torch._inductor import config as inductor_config
 from torch._inductor.cpp_builder import is_msvc_cl
 from torch._inductor.test_case import run_tests, TestCase
+from torch._subclasses import FakeTensorMode
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.overrides import BaseTorchFunctionMode
@@ -3239,6 +3241,38 @@ main()
         # CPU-only graphs skip cudagraphs regardless of graph_partition setting
         # (no GPU devices to use cudagraphs with)
         self.assertEqual(counters["inductor"]["cudagraph_skips"], 1)
+
+    def test_cudagraphs_move_graph_nodes_to_device(self):
+        with FakeTensorMode():
+            xpu_act = torch.zeros(4, 4, device="xpu")
+            cpu_scalar = torch.zeros((), device="cpu")
+
+        def build_graph(vals):
+            graph = torch.fx.Graph()
+            inputs = graph.placeholder("inputs")
+            for name in ("sizes", "scalars", "hooks", "packed_data"):
+                graph.placeholder(name)
+            nodes = []
+            for i, val in enumerate(vals):
+                node = graph.call_function(operator.getitem, (inputs, i))
+                node.meta["val"] = val
+                nodes.append(node)
+            # cpu scalars are only movable if all their users are prims/aten ops
+            graph.call_function(torch.ops.aten.add.Tensor, (nodes[-1], nodes[-1]))
+            return graph
+
+        instance = compiled_autograd.AutogradCompilerInstance(lambda gm: gm)
+        indices, device_type = instance.move_graph_nodes_to_device(
+            build_graph([xpu_act, cpu_scalar])
+        )
+        self.assertEqual(device_type, "xpu")
+        self.assertEqual(indices, [1])
+
+        indices, device_type = instance.move_graph_nodes_to_device(
+            build_graph([cpu_scalar])
+        )
+        self.assertIsNone(device_type)
+        self.assertEqual(indices, [])
 
     @skipIfXpu(msg="cudagraphs not supported on xpu for now!")
     @requires_gpu_and_triton
