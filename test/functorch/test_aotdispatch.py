@@ -4315,6 +4315,19 @@ def forward(self, tangents_1):
             y = x @ x
             self.assertEqual(y.dtype, torch.float32)
 
+    def test_get_autocast_states_covers_all_supported_devices(self):
+        from torch._functorch._aot_autograd.utils import _get_autocast_states
+
+        prior = _get_autocast_states()
+        for device_type in torch._C._autocast_supported_devices():
+            prev_enabled = torch.is_autocast_enabled(device_type)
+            torch.set_autocast_enabled(device_type, not prev_enabled)
+            try:
+                self.assertNotEqual(prior, _get_autocast_states())
+            finally:
+                torch.set_autocast_enabled(device_type, prev_enabled)
+            self.assertEqual(prior, _get_autocast_states())
+
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
     def test_nonidempotent_amp(self):
         def f(self_s_emb, add_3):
