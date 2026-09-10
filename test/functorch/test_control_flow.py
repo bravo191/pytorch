@@ -7910,6 +7910,25 @@ def forward(self, L_pred_ : torch.Tensor, L_x_ : torch.Tensor):
             self.assertEqual(x, torch.ones_like(x))
             self.assertEqual(iteration, torch.zeros_like(iteration))
 
+    def test_conditional_capture_modes_construct_without_eager_stream(self):
+        # ControlFlowOpWarmupDispatchMode used to create a torch.cuda.Stream in
+        # __init__, which raised on machines without CUDA; device state is now
+        # deferred to dispatch time.
+        warmup_mode = ControlFlowOpWarmupDispatchMode()
+        self.assertIsNone(warmup_mode.capture_stream)
+        CUDAGraphCaptureControlFlowOpDispatchMode()
+
+    def test_conditional_capture_backend_lookup(self):
+        from torch._higher_order_ops.cudagraph_conditional_nodes import (
+            _get_graph_capture_backend,
+        )
+
+        device_mod, graph_cls = _get_graph_capture_backend("cuda")
+        self.assertIs(device_mod, torch.cuda)
+        self.assertIs(graph_cls, torch.cuda.CUDAGraph)
+        with self.assertRaisesRegex(ValueError, "cpu"):
+            _get_graph_capture_backend("cpu")
+
     @unittest.skipIf(
         not TEST_CUDA_GRAPH_CONDITIONAL_NODES,
         "CUDA 12.4 or greater is required for CUDA Graphs with conditional nodes",
