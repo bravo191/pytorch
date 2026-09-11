@@ -2305,5 +2305,41 @@ class TestCuptiAnnotationBackend(TestCase):
             )
 
 
+# Admission registry for cudagraph wrapping: a backend registers its device type so
+# single-device graphs on it stop being skipped as "multiple devices". No CUDA needed -
+# the check only reads the device keys of the mapping.
+class TestCudagraphSupportedDeviceTypes(TestCase):
+    def test_register_cudagraph_supported_device_type(self):
+        from torch._inductor.cudagraph_utils import (
+            _CUDAGRAPH_SUPPORTED_DEVICE_TYPES,
+            check_multiple_devices_or_any_cpu_nodes,
+            register_cudagraph_supported_device_type,
+        )
+
+        device_type = torch._C._get_privateuse1_backend_name()
+        device_node_mapping = {torch.device(device_type): None}
+
+        # Unregistered: a single-device graph on a foreign device is still skipped.
+        self.assertIsNotNone(
+            check_multiple_devices_or_any_cpu_nodes(dict(device_node_mapping))
+        )
+
+        try:
+            register_cudagraph_supported_device_type(device_type)
+            self.assertIn(device_type, _CUDAGRAPH_SUPPORTED_DEVICE_TYPES)
+            # Registered: the single-device graph is admitted.
+            self.assertIsNone(
+                check_multiple_devices_or_any_cpu_nodes(dict(device_node_mapping))
+            )
+        finally:
+            _CUDAGRAPH_SUPPORTED_DEVICE_TYPES.discard(device_type)
+
+        self.assertNotIn(device_type, _CUDAGRAPH_SUPPORTED_DEVICE_TYPES)
+        # The in-tree device remains supported without any registration.
+        self.assertIsNone(
+            check_multiple_devices_or_any_cpu_nodes({torch.device("cuda"): None})
+        )
+
+
 if __name__ == "__main__":
     run_tests()

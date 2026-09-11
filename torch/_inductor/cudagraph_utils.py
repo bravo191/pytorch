@@ -33,7 +33,23 @@ static_inputs_log = torch._logging.getArtifactLogger(
 OutputType = list[int | torch.Tensor | None]
 ModelType = Callable[[list[InputType]], OutputType]
 
-_CUDAGRAPH_SUPPORTED_DEVICE_TYPES = frozenset(OrderedSet(["cuda"]))
+_CUDAGRAPH_SUPPORTED_DEVICE_TYPES: OrderedSet[str] = OrderedSet(["cuda"])
+
+
+def register_cudagraph_supported_device_type(device_type: str) -> None:
+    """Register a device type as supporting cudagraph capture and replay.
+
+    The device backend must provide graph capture and replay for the device
+    (e.g. via a ``CUDAGraphPolicy`` overriding ``cudagraphify``). Registered
+    device types are admitted by ``check_multiple_devices_or_any_cpu_nodes``
+    for single-device graphs.
+
+    Args:
+        device_type: The device type string (e.g. "cuda").
+    """
+    # Validate the device type resolves to a real dispatch key.
+    getattr(torch._C.DispatchKey, torch._C._dispatch_key_for_device(device_type))
+    _CUDAGRAPH_SUPPORTED_DEVICE_TYPES.add(device_type)
 
 
 def cudagraph_trees_generation_cloning() -> Literal["user_visible"] | None:
